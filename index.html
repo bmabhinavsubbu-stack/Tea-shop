@@ -6,6 +6,7 @@
 <title>Tea Counter — Billing</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Work+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/2.0.4/qrcode.min.js"></script>
 <style>
   :root{
     --espresso:#1E140D;
@@ -127,6 +128,25 @@
   .r-total-row{ display:flex; justify-content:space-between; font-size:1.05rem; font-weight:700; margin-top:6px; }
   .r-footer{ text-align:center; font-size:.72rem; color:#5a4a38; margin-top:10px; }
 
+  .pay-section{ margin-top:14px; }
+  .pay-toggle{ display:flex; gap:8px; background:var(--roast); padding:5px; border-radius:10px; }
+  .pay-toggle button{
+    flex:1; border:none; background:transparent; color:var(--muted);
+    padding:9px 10px; border-radius:7px; font-size:.85rem; font-weight:600;
+  }
+  .pay-toggle button.active{ background:var(--amber); color:var(--espresso); }
+  .upi-box{
+    margin-top:12px; background:var(--paper); border-radius:8px; padding:16px;
+    text-align:center; color:var(--ink);
+  }
+  .upi-box canvas{ image-rendering:pixelated; }
+  .upi-box .upi-caption{ font-size:.78rem; color:#5a4a38; margin-top:8px; }
+  .upi-box .upi-amt{ font-family:'IBM Plex Mono', monospace; font-weight:700; font-size:1.1rem; margin-bottom:8px; }
+  .upi-missing{
+    margin-top:12px; background:rgba(166,80,30,.15); border:1px solid var(--rust);
+    color:var(--muted); font-size:.82rem; padding:12px 14px; border-radius:8px; text-align:center;
+  }
+  .upi-missing a{ color:var(--amber); cursor:pointer; font-weight:600; }
   .bill-actions{ display:flex; gap:10px; margin-top:14px; }
   .btn{
     flex:1; border:none; border-radius:8px; padding:12px 14px; font-weight:600; font-size:.9rem;
@@ -259,6 +279,24 @@
               <div class="r-footer" id="rFooter"></div>
             </div>
           </div>
+          <div class="pay-section">
+            <div class="pay-toggle">
+              <button type="button" class="active" data-pay="cash" id="payCashBtn">Cash</button>
+              <button type="button" data-pay="upi" id="payUpiBtn">Google Pay / UPI</button>
+            </div>
+            <div id="upiArea"></div>
+          </div>
+
+          <div class="field" style="margin-top:14px;">
+            <label for="waNumber">Send receipt on WhatsApp (optional)</label>
+            <div class="row">
+              <div class="field" style="margin-bottom:0;">
+                <input type="tel" id="waNumber" placeholder="Customer's 10-digit mobile number">
+              </div>
+              <button class="btn btn-outline" style="flex:0 0 auto; padding:10px 18px;" id="sendWaBtn" type="button">Send</button>
+            </div>
+          </div>
+
           <div class="bill-actions">
             <button class="btn btn-secondary" id="clearCartBtn">Clear</button>
             <button class="btn btn-primary" id="savePrintBtn">Save &amp; Print</button>
@@ -329,6 +367,16 @@
             <input type="text" id="setFooter" placeholder="Thank you, visit again!">
           </div>
         </div>
+        <h2 class="section-title" style="margin-top:8px;">Accept Google Pay / UPI</h2>
+        <p class="subtle" style="margin-top:-8px; margin-bottom:16px;">
+          Enter your shop's UPI ID (the one linked to Google Pay, PhonePe, Paytm, or your bank).
+          A payment QR code will then appear on the Billing tab — customers scan it with any UPI
+          app and pay you directly. No bank or payment provider account needs to be created here.
+        </p>
+        <div class="field">
+          <label for="setUpiId">UPI ID</label>
+          <input type="text" id="setUpiId" placeholder="yourshop@okaxis">
+        </div>
         <button class="btn btn-primary" style="flex:0 0 auto; padding:10px 22px;" id="saveSettingsBtn">Save settings</button>
       </div>
     </section>
@@ -368,15 +416,17 @@
     {id:'m9', name:'Vada', price:10},
     {id:'m10', name:'Biscuit', price:5}
   ];
-  var DEFAULT_SETTINGS = { shopName:'Tea Counter', address:'', phone:'', currency:'₹', footer:'Thank you, visit again!' };
+  var DEFAULT_SETTINGS = { shopName:'Tea Counter', address:'', phone:'', currency:'₹', footer:'Thank you, visit again!', upiId:'' };
 
   var state = {
     menu: load(KEYS.menu, DEFAULT_MENU),
     settings: load(KEYS.settings, DEFAULT_SETTINGS),
     history: load(KEYS.history, []),
     counter: load(KEYS.counter, 0),
-    cart: []
+    cart: [],
+    paymentMethod: 'cash'
   };
+  if(state.settings.upiId === undefined) state.settings.upiId = '';
   if(!localStorage.getItem(KEYS.menu)) save(KEYS.menu, state.menu);
   if(!localStorage.getItem(KEYS.settings)) save(KEYS.settings, state.settings);
 
@@ -503,12 +553,110 @@
       });
     }
     document.getElementById('rTotal').textContent = fmt(cartTotal());
+    renderPaymentSection();
+  }
+
+  /* ---------------- Payment method + UPI / Google Pay QR ---------------- */
+  function buildUpiUri(){
+    var amt = cartTotal();
+    var params = [
+      'pa=' + encodeURIComponent(state.settings.upiId),
+      'pn=' + encodeURIComponent(state.settings.shopName || 'Tea Counter'),
+      'am=' + encodeURIComponent(amt.toFixed(2)),
+      'cu=INR',
+      'tn=' + encodeURIComponent('Bill ' + (state.counter + 1))
+    ];
+    return 'upi://pay?' + params.join('&');
+  }
+
+  function renderPaymentSection(){
+    var upiArea = document.getElementById('upiArea');
+    var cashBtn = document.getElementById('payCashBtn');
+    var upiBtn = document.getElementById('payUpiBtn');
+    cashBtn.classList.toggle('active', state.paymentMethod === 'cash');
+    upiBtn.classList.toggle('active', state.paymentMethod === 'upi');
+
+    if(state.paymentMethod !== 'upi'){
+      upiArea.innerHTML = '';
+      return;
+    }
+    if(!state.settings.upiId){
+      upiArea.innerHTML = '<div class="upi-missing">No UPI ID set up yet. ' +
+        '<a id="goToSettingsLink">Add it in Settings</a> to show a Google Pay / UPI QR code here.</div>';
+      var link = document.getElementById('goToSettingsLink');
+      if(link) link.addEventListener('click', function(){
+        document.querySelector('.tab[data-tab="settings"]').click();
+      });
+      return;
+    }
+    if(state.cart.length === 0){
+      upiArea.innerHTML = '<div class="upi-missing">Add items to the bill to generate a payment QR code.</div>';
+      return;
+    }
+    upiArea.innerHTML = '<div class="upi-box">' +
+      '<div class="upi-amt">' + fmt(cartTotal()) + '</div>' +
+      '<div id="qrCanvasHolder"></div>' +
+      '<div class="upi-caption">Scan with Google Pay, PhonePe, Paytm or any UPI app</div>' +
+      '</div>';
+    try{
+      var qr = qrcode(0, 'M');
+      qr.addData(buildUpiUri());
+      qr.make();
+      document.getElementById('qrCanvasHolder').innerHTML = qr.createSvgTag({ cellSize:5, margin:4 });
+    }catch(e){
+      document.getElementById('qrCanvasHolder').innerHTML = '<p class="subtle" style="color:#a33;">Could not generate QR code.</p>';
+    }
+  }
+
+  document.getElementById('payCashBtn').addEventListener('click', function(){
+    state.paymentMethod = 'cash';
+    renderPaymentSection();
+  });
+  document.getElementById('payUpiBtn').addEventListener('click', function(){
+    state.paymentMethod = 'upi';
+    renderPaymentSection();
+  });
+
+  /* ---------------- WhatsApp receipt sending ---------------- */
+  function normalizePhone(raw){
+    var digits = String(raw || '').replace(/[^0-9+]/g, '');
+    if(digits.indexOf('+') === 0) return digits.slice(1);
+    if(digits.length === 10) return '91' + digits;
+    return digits;
+  }
+  function buildWhatsAppMessage(bill){
+    var s = state.settings;
+    var lines = [];
+    lines.push('*' + (s.shopName || 'Tea Counter') + '*');
+    lines.push('Bill #' + bill.billNo + ' · ' + new Date(bill.dateISO).toLocaleString('en-IN'));
+    lines.push('');
+    bill.items.forEach(function(it){
+      lines.push(it.name + ' x' + it.qty + ' - ' + fmt(it.price * it.qty));
+    });
+    lines.push('');
+    lines.push('*Total: ' + fmt(bill.total) + '*');
+    lines.push('Paid via: ' + (bill.paymentMethod === 'upi' ? 'Google Pay / UPI' : 'Cash'));
+    if(s.footer) lines.push('');
+    if(s.footer) lines.push(s.footer);
+    return lines.join('\n');
+  }
+  function sendBillOnWhatsApp(bill, rawNumber){
+    var number = normalizePhone(rawNumber);
+    if(number.length < 11){
+      showToast('Enter a valid mobile number to send on WhatsApp');
+      return false;
+    }
+    var url = 'https://wa.me/' + number + '?text=' + encodeURIComponent(buildWhatsAppMessage(bill));
+    window.open(url, '_blank');
+    return true;
   }
 
   document.getElementById('clearCartBtn').addEventListener('click', function(){
     if(state.cart.length === 0) return;
     if(confirm('Clear the current bill?')){
       state.cart = [];
+      state.paymentMethod = 'cash';
+      document.getElementById('waNumber').value = '';
       renderReceipt();
     }
   });
@@ -524,15 +672,42 @@
       billNo: state.counter,
       dateISO: new Date().toISOString(),
       items: state.cart.map(function(c){ return { name:c.name, price:c.price, qty:c.qty }; }),
-      total: cartTotal()
+      total: cartTotal(),
+      paymentMethod: state.paymentMethod,
+      customerPhone: document.getElementById('waNumber').value.trim()
     };
     state.history.unshift(bill);
     save(KEYS.history, state.history);
     buildPrintArea(bill);
     window.print();
     state.cart = [];
+    state.paymentMethod = 'cash';
+    document.getElementById('waNumber').value = '';
     renderReceipt();
     showToast('Bill #' + bill.billNo + ' saved');
+  });
+
+  document.getElementById('sendWaBtn').addEventListener('click', function(){
+    if(state.cart.length === 0){
+      showToast('Add items to the bill first');
+      return;
+    }
+    var number = document.getElementById('waNumber').value.trim();
+    if(!number){
+      showToast('Enter the customer\'s WhatsApp number');
+      document.getElementById('waNumber').focus();
+      return;
+    }
+    var previewBill = {
+      billNo: state.counter + 1,
+      dateISO: new Date().toISOString(),
+      items: state.cart.map(function(c){ return { name:c.name, price:c.price, qty:c.qty }; }),
+      total: cartTotal(),
+      paymentMethod: state.paymentMethod
+    };
+    if(sendBillOnWhatsApp(previewBill, number)){
+      showToast('Opening WhatsApp…');
+    }
   });
 
   function buildPrintArea(bill){
@@ -549,6 +724,7 @@
       }).join('') +
       '<hr>' +
       '<div class="p-total"><span>TOTAL</span><span>' + fmt(bill.total) + '</span></div>' +
+      '<div class="p-line" style="text-align:left; margin-top:4px;">Paid via: ' + (bill.paymentMethod === 'upi' ? 'Google Pay / UPI' : 'Cash') + '</div>' +
       (s.footer ? '<div class="p-footer">' + escapeHtml(s.footer) + '</div>' : '') +
       '</div>';
     document.getElementById('printArea').innerHTML = html;
@@ -649,10 +825,12 @@
       var dayTotal = bills.reduce(function(s,b){ return s + b.total; }, 0);
       var billsHtml = bills.map(function(b){
         var time = new Date(b.dateISO).toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit'});
+        var payLabel = b.paymentMethod === 'upi' ? 'UPI' : 'Cash';
         return '<div class="bill-card">' +
-          '<div><span class="bno">Bill #' + b.billNo + '</span><span class="time">' + time + ' · ' + b.items.length + ' item(s)</span></div>' +
+          '<div><span class="bno">Bill #' + b.billNo + '</span><span class="time">' + time + ' · ' + b.items.length + ' item(s) · ' + payLabel + '</span></div>' +
           '<div style="display:flex; align-items:center; gap:14px;">' +
             '<span class="amt">' + fmt(b.total) + '</span>' +
+            '<button class="icon-btn wa-btn" data-billno="' + b.billNo + '" title="Send on WhatsApp">💬 WhatsApp</button>' +
             '<button class="icon-btn reprint-btn" data-billno="' + b.billNo + '">🖨 Reprint</button>' +
           '</div></div>';
       }).join('');
@@ -661,6 +839,21 @@
         billsHtml + '</div>';
     }).join('');
 
+    container.querySelectorAll('.wa-btn').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        var billNo = parseInt(btn.dataset.billno, 10);
+        var bill = state.history.find(function(b){ return b.billNo === billNo; });
+        if(!bill) return;
+        var defaultNumber = bill.customerPhone || '';
+        var number = prompt('Send Bill #' + bill.billNo + ' on WhatsApp to which number?', defaultNumber);
+        if(number === null) return;
+        number = number.trim();
+        if(!number){ showToast('Enter a mobile number'); return; }
+        bill.customerPhone = number;
+        save(KEYS.history, state.history);
+        sendBillOnWhatsApp(bill, number);
+      });
+    });
     container.querySelectorAll('.reprint-btn').forEach(function(btn){
       btn.addEventListener('click', function(){
         var billNo = parseInt(btn.dataset.billno, 10);
@@ -689,6 +882,7 @@
     document.getElementById('setPhone').value = state.settings.phone || '';
     document.getElementById('setCurrency').value = state.settings.currency || '₹';
     document.getElementById('setFooter').value = state.settings.footer || '';
+    document.getElementById('setUpiId').value = state.settings.upiId || '';
   }
   document.getElementById('saveSettingsBtn').addEventListener('click', function(){
     state.settings = {
@@ -696,7 +890,8 @@
       address: document.getElementById('setAddress').value.trim(),
       phone: document.getElementById('setPhone').value.trim(),
       currency: document.getElementById('setCurrency').value.trim() || '₹',
-      footer: document.getElementById('setFooter').value.trim()
+      footer: document.getElementById('setFooter').value.trim(),
+      upiId: document.getElementById('setUpiId').value.trim()
     };
     save(KEYS.settings, state.settings);
     fillReceiptHeader();
